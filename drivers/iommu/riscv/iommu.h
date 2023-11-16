@@ -37,8 +37,19 @@ struct riscv_iommu_device {
 	unsigned int irqs[RISCV_IOMMU_INTR_COUNT];
 	unsigned int irqs_count;
 
+	/* device directory */
+	unsigned int ddt_mode;
+	dma_addr_t ddt_phys;
+	u64 *ddt_root;
+
 	/* device level debug directory dentry */
 	struct dentry *debugfs;
+};
+
+/* This struct contains device (endpoint) specific IOMMU driver data. */
+struct riscv_iommu_endpoint {
+	unsigned int devid;
+	u8 attached:1;
 };
 
 int riscv_iommu_init(struct riscv_iommu_device *iommu);
