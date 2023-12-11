@@ -74,6 +74,16 @@ struct riscv_iommu_endpoint {
 	u8 attached:1;
 };
 
+/* This struct contains protection domain specific IOMMU driver data. */
+struct riscv_iommu_domain {
+	struct iommu_domain domain;
+	struct riscv_iommu_device *iommu;
+	unsigned long pgd_root;
+	int numa_node;
+	int pscid;
+	u8 pt_mode;
+};
+
 int riscv_iommu_init(struct riscv_iommu_device *iommu);
 void riscv_iommu_remove(struct riscv_iommu_device *iommu);
 
