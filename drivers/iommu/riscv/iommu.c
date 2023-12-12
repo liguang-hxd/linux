@@ -19,6 +19,7 @@
 #include <linux/iommu.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/pci.h>
 
 #include "iommu-bits.h"
 #include "iommu.h"
@@ -30,7 +31,7 @@ MODULE_ALIAS("riscv-iommu");
 MODULE_LICENSE("GPL v2");
 
 /* Timeouts in [us] */
-#define RISCV_IOMMU_DDTP_TIMEOUT       50000
+#define RISCV_IOMMU_DDTP_TIMEOUT	50000
 
 static int riscv_iommu_attach_identity_domain(struct iommu_domain *domain,
 					      struct device *dev)
@@ -65,8 +66,8 @@ static int riscv_iommu_of_xlate(struct device *dev, struct of_phandle_args *args
 
 static struct iommu_device *riscv_iommu_probe_device(struct device *dev)
 {
-	struct riscv_iommu_device *iommu;
 	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
+	struct riscv_iommu_device *iommu;
 
 	/* Early bus-scan exit, will retry. */
 	if (!fwspec || !fwspec->iommu_fwnode)
