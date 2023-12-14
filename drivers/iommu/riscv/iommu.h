@@ -16,8 +16,10 @@
 #include <linux/iommu.h>
 #include <linux/types.h>
 #include <linux/iopoll.h>
+#include <linux/mmu_notifier.h>
 
 #include "iommu-bits.h"
+#include "../iommu-sva.h"
 
 struct riscv_iommu_device;
 
@@ -64,6 +66,9 @@ struct riscv_iommu_device {
 	dma_addr_t ddt_phys;
 	u64 *ddt_root;
 
+	/* I/O page fault queue */
+	struct iopf_queue *pq_work;
+
 	/* device level debug directory dentry */
 	struct dentry *debugfs;
 };
@@ -72,10 +77,15 @@ struct riscv_iommu_device {
 struct riscv_iommu_endpoint {
 	unsigned int devid;
 	struct list_head ats_link;
+	struct riscv_iommu_pc *pc;
+	int max_pasid;
 	u8 ats_queue_depth;
 	u8 attached:1;
 	u8 ats_supported:1;
 	u8 ats_enabled:1;
+	u8 pasid_supported:1;
+	u8 pasid_enabled:1;
+	u8 sva_enabled:1;
 };
 
 /* This struct contains protection domain specific IOMMU driver data. */
