@@ -21,6 +21,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/pci-ats.h>
 
 #include "iommu-bits.h"
 #include "iommu.h"
@@ -546,6 +547,64 @@ static inline void riscv_iommu_cmd_iodir_set_pid(struct riscv_iommu_command *cmd
 	cmd->dword0 |= FIELD_PREP(RISCV_IOMMU_CMD_IODIR_PID, pasid);
 }
 
+static inline void riscv_iommu_cmd_ats_inval(struct riscv_iommu_command *cmd)
+{
+	cmd->dword0 = FIELD_PREP(RISCV_IOMMU_CMD_OPCODE, RISCV_IOMMU_CMD_ATS_OPCODE) |
+		      FIELD_PREP(RISCV_IOMMU_CMD_FUNC, RISCV_IOMMU_CMD_ATS_FUNC_INVAL);
+	cmd->dword1 = 0;
+}
+
+static inline void riscv_iommu_cmd_ats_set_devid(struct riscv_iommu_command *cmd,
+						 unsigned int devid)
+{
+	const unsigned int seg = (devid & 0x0ff0000) >> 16;
+	const unsigned int rid = (devid & 0x000ffff);
+
+	cmd->dword0 |= FIELD_PREP(RISCV_IOMMU_CMD_ATS_DSEG, seg) | RISCV_IOMMU_CMD_ATS_DSV |
+		       FIELD_PREP(RISCV_IOMMU_CMD_ATS_RID, rid);
+}
+
+static inline void riscv_iommu_cmd_ats_set_pid(struct riscv_iommu_command *cmd,
+					       unsigned int pid)
+{
+	cmd->dword0 |= FIELD_PREP(RISCV_IOMMU_CMD_ATS_PID, pid) | RISCV_IOMMU_CMD_ATS_PV;
+}
+
+static inline void riscv_iommu_cmd_ats_set_range(struct riscv_iommu_command *cmd,
+						 unsigned long start, unsigned long end,
+						 bool global_inv)
+{
+	size_t len = end - start + 1;
+	u64 payload = 0;
+
+	/*
+	 * PCI Express specification
+	 * Section 10.2.3.2 Translation Range Size (S) Field
+	 */
+	if (len < PAGE_SIZE)
+		len = PAGE_SIZE;
+	else
+		len = __roundup_pow_of_two(len);
+
+	payload = (start & ~(len - 1)) | (((len - 1) >> 12) << 11);
+
+	if (global_inv)
+		payload |= RISCV_IOMMU_CMD_ATS_INVAL_G;
+
+	cmd->dword1 = payload;
+}
+
+static inline void riscv_iommu_cmd_ats_set_all(struct riscv_iommu_command *cmd,
+					       bool global_inv)
+{
+	u64 payload = GENMASK_ULL(62, 11);
+
+	if (global_inv)
+		payload |= RISCV_IOMMU_CMD_ATS_INVAL_G;
+
+	cmd->dword1 = payload;
+}
+
 /*
  * IOMMU Fault/Event queue chapter 3.2
  */
@@ -868,6 +927,16 @@ static void riscv_iommu_detach_device(struct device *dev, struct riscv_iommu_dc 
 		WARN_ON(riscv_iommu_queue_send(cmdq, &cmd, 0));
 	}
 
+	if (ep->ats_enabled) {
+		list_del(&ep->ats_link);
+		riscv_iommu_cmd_ats_inval(&cmd);
+		riscv_iommu_cmd_ats_set_all(&cmd, true);
+		riscv_iommu_cmd_ats_set_devid(&cmd, ep->devid);
+		riscv_iommu_queue_send(cmdq, &cmd, 0);
+		pci_disable_ats(to_pci_dev(dev));
+		ep->ats_enabled = false;
+	}
+
 	/* IOFENCE.C */
 	riscv_iommu_cmd_iofence(&cmd);
 	WARN_ON(riscv_iommu_queue_send(cmdq, &cmd, RISCV_IOMMU_QUEUE_TIMEOUT));
@@ -889,22 +958,31 @@ static void riscv_iommu_detach_device(struct device *dev, struct riscv_iommu_dc 
 static void riscv_iommu_flush_iotlb_all(struct iommu_domain *iommu_domain)
 {
 	struct riscv_iommu_domain *domain = iommu_domain_to_riscv(iommu_domain);
-	struct riscv_iommu_device *iommu = domain->iommu;
+	struct riscv_iommu_queue *cmdq = &domain->iommu->cmdq;
+	struct riscv_iommu_endpoint *ep;
 	struct riscv_iommu_command cmd;
 
 	riscv_iommu_cmd_inval_vma(&cmd);
 	riscv_iommu_cmd_inval_set_pscid(&cmd, domain->pscid);
-	riscv_iommu_queue_send(&iommu->cmdq, &cmd, 0);
+	riscv_iommu_queue_send(cmdq, &cmd, 0);
+
+	list_for_each_entry(ep, &domain->ats_devs, ats_link) {
+		riscv_iommu_cmd_ats_inval(&cmd);
+		riscv_iommu_cmd_ats_set_all(&cmd, true);
+		riscv_iommu_cmd_ats_set_devid(&cmd, ep->devid);
+		riscv_iommu_queue_send(cmdq, &cmd, 0);
+	}
 
 	riscv_iommu_cmd_iofence(&cmd);
-	riscv_iommu_queue_send(&iommu->cmdq, &cmd, RISCV_IOMMU_QUEUE_TIMEOUT);
+	riscv_iommu_queue_send(cmdq, &cmd, RISCV_IOMMU_QUEUE_TIMEOUT);
 }
 
 static void riscv_iommu_iotlb_sync(struct iommu_domain *iommu_domain,
 				   struct iommu_iotlb_gather *gather)
 {
 	struct riscv_iommu_domain *domain = iommu_domain_to_riscv(iommu_domain);
-	struct riscv_iommu_device *iommu = domain->iommu;
+	struct riscv_iommu_queue *cmdq = &domain->iommu->cmdq;
+	struct riscv_iommu_endpoint *ep;
 	struct riscv_iommu_command cmd;
 	unsigned long iova;
 
@@ -913,11 +991,18 @@ static void riscv_iommu_iotlb_sync(struct iommu_domain *iommu_domain,
 
 	for (iova = gather->start; iova <= gather->end; iova += PAGE_SIZE) {
 		riscv_iommu_cmd_inval_set_addr(&cmd, iova);
-		riscv_iommu_queue_send(&iommu->cmdq, &cmd, 0);
+		riscv_iommu_queue_send(cmdq, &cmd, 0);
+	}
+
+	list_for_each_entry(ep, &domain->ats_devs, ats_link) {
+		riscv_iommu_cmd_ats_inval(&cmd);
+		riscv_iommu_cmd_ats_set_range(&cmd, gather->start, gather->end, true);
+		riscv_iommu_cmd_ats_set_devid(&cmd, ep->devid);
+		riscv_iommu_queue_send(cmdq, &cmd, 0);
 	}
 
 	riscv_iommu_cmd_iofence(&cmd);
-	riscv_iommu_queue_send(&iommu->cmdq, &cmd, RISCV_IOMMU_QUEUE_TIMEOUT);
+	riscv_iommu_queue_send(cmdq, &cmd, RISCV_IOMMU_QUEUE_TIMEOUT);
 }
 
 static inline size_t get_page_size(size_t size)
@@ -1156,6 +1241,7 @@ static int riscv_iommu_attach_paging_domain(struct iommu_domain *iommu_domain,
 	struct riscv_iommu_device *iommu = dev_to_iommu(dev);
 	struct riscv_iommu_dc *dc;
 	struct page *page;
+	u64 tc;
 
 	if (!riscv_iommu_pt_supported(iommu, domain->pt_mode))
 		return -ENODEV;
@@ -1182,13 +1268,23 @@ static int riscv_iommu_attach_paging_domain(struct iommu_domain *iommu_domain,
 		domain->pgd_root = (unsigned long)page_to_virt(page);
 	}
 
+	tc = RISCV_IOMMU_DC_TC_V;
+
+	if (ep->ats_supported)
+		ep->ats_enabled = pci_enable_ats(to_pci_dev(dev), PAGE_SHIFT) == 0;
+
+	if (ep->ats_enabled) {
+		list_add(&domain->ats_devs, &ep->ats_link);
+		tc |= RISCV_IOMMU_DC_TC_EN_ATS;
+	}
+
 	dc->iohgatp = FIELD_PREP(RISCV_IOMMU_DC_IOHGATP_MODE, RISCV_IOMMU_DC_IOHGATP_MODE_BARE);
 	dc->ta      = FIELD_PREP(RISCV_IOMMU_DC_TA_PSCID, domain->pscid);
 	dc->fsc     = FIELD_PREP(RISCV_IOMMU_DC_FSC_MODE, domain->pt_mode) |
 		      FIELD_PREP(RISCV_IOMMU_DC_FSC_PPN, virt_to_pfn(domain->pgd_root));
 	/* Make device context data globaly observable before marking it valid. */
 	wmb();
-	dc->tc = RISCV_IOMMU_DC_TC_V;
+	dc->tc = tc;
 	ep->attached = true;
 
 	return 0;
@@ -1224,6 +1320,7 @@ static struct iommu_domain *riscv_iommu_domain_alloc(unsigned int type)
 		ida_free(&riscv_iommu_pscids, pscid);
 		return NULL;
 	}
+	INIT_LIST_HEAD(&domain->ats_devs);
 
 	/*
 	 * Note: RISC-V Privilege spec mandates that virtual addresses
@@ -1336,7 +1433,15 @@ static struct iommu_device *riscv_iommu_probe_device(struct device *dev)
 	if (!ep)
 		return ERR_PTR(-ENOMEM);
 
+	INIT_LIST_HEAD(&ep->ats_link);
 	ep->devid = devid;
+
+	if (pdev) {
+		if (iommu->caps & RISCV_IOMMU_CAP_ATS)
+			ep->ats_supported = pci_ats_supported(pdev);
+		if (ep->ats_supported)
+			ep->ats_queue_depth = pci_ats_queue_depth(pdev);
+	}
 
 	dev_iommu_priv_set(dev, ep);
 

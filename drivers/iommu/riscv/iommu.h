@@ -71,13 +71,18 @@ struct riscv_iommu_device {
 /* This struct contains device (endpoint) specific IOMMU driver data. */
 struct riscv_iommu_endpoint {
 	unsigned int devid;
+	struct list_head ats_link;
+	u8 ats_queue_depth;
 	u8 attached:1;
+	u8 ats_supported:1;
+	u8 ats_enabled:1;
 };
 
 /* This struct contains protection domain specific IOMMU driver data. */
 struct riscv_iommu_domain {
 	struct iommu_domain domain;
 	struct riscv_iommu_device *iommu;
+	struct list_head ats_devs;
 	unsigned long pgd_root;
 	int numa_node;
 	int pscid;
