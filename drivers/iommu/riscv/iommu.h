@@ -60,11 +60,16 @@ struct riscv_iommu_device {
 	/* hardware queues */
 	struct riscv_iommu_queue cmdq;
 	struct riscv_iommu_queue fltq;
+	struct riscv_iommu_queue priq;
 
 	/* device directory */
 	unsigned int ddt_mode;
 	dma_addr_t ddt_phys;
 	u64 *ddt_root;
+
+	/* Connected end-points */
+	struct rb_root eps;
+	struct mutex eps_mutex;
 
 	/* I/O page fault queue */
 	struct iopf_queue *pq_work;
@@ -76,7 +81,8 @@ struct riscv_iommu_device {
 /* This struct contains device (endpoint) specific IOMMU driver data. */
 struct riscv_iommu_endpoint {
 	unsigned int devid;
-	struct list_head ats_link;
+	struct device *dev;
+	struct rb_node eps_node;
 	struct riscv_iommu_pc *pc;
 	int max_pasid;
 	u8 ats_queue_depth;
@@ -86,17 +92,9 @@ struct riscv_iommu_endpoint {
 	u8 pasid_supported:1;
 	u8 pasid_enabled:1;
 	u8 sva_enabled:1;
-};
-
-/* This struct contains protection domain specific IOMMU driver data. */
-struct riscv_iommu_domain {
-	struct iommu_domain domain;
-	struct riscv_iommu_device *iommu;
-	struct list_head ats_devs;
-	unsigned long pgd_root;
-	int numa_node;
-	int pscid;
-	u8 pt_mode;
+	u8 pri_supported:1;
+	u8 pri_enabled:1;
+	u8 pri_pasid_required:1;
 };
 
 int riscv_iommu_init(struct riscv_iommu_device *iommu);
